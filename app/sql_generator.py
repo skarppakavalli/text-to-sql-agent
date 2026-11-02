@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from schema import get_database_schema
+from app.schema import get_database_schema
 
 load_dotenv()
 

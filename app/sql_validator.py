@@ -4,7 +4,7 @@ from sqlglot.errors import ParseError #raises exception when SQLGlot cannot pars
 from sqlglot.optimizer.scope import traverse_scope # to traverse CTE & sub-queries
 
 from sqlalchemy import inspect
-from schema import engine
+from app.schema import engine
 
 ALLOWED_SCHEMA = "public"
 
