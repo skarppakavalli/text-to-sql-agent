@@ -1,6 +1,7 @@
 import sqlglot
 from sqlglot import exp # Contains SQL expression classes that represent different SQL constructs
 from sqlglot.errors import ParseError #raises exception when SQLGlot cannot parse the gn exp
+from sqlglot.optimizer.scope import traverse_scope # to traverse CTE & sub-queries
 
 from sqlalchemy import inspect
 from schema import engine
@@ -12,31 +13,50 @@ def get_allowed_tables() -> set[str]:
 
     return set(inspector.get_table_names(schema= ALLOWED_SCHEMA)) #Gets the table names from the PostgreSQL public schema.
 
-def get_cte_table_names(tree: exp.Expression) -> set[str]:
-    return {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
+def validate_tables_by_scope(tree: exp.Expression) -> tuple[bool, str]:
+    allowed_tables = get_allowed_tables()
+
+    for scope in traverse_scope(tree):
+        for source in scope.sources.values():
+
+            if isinstance(source, exp.Table):
+                table_name = source.name.lower()
+                schema_name = source.db.lower()
+                catalog_name = source.catalog.lower()
+
+                if catalog_name:
+                    return False, "Cross-database access is not allowed."
+
+                if schema_name and schema_name != ALLOWED_SCHEMA:
+                    return False, f"Access to schema '{schema_name}' is not allowed."
+
+                if table_name not in allowed_tables:
+                    return False, f"Table '{table_name}' is not allowed."
+
+    return True, "All physical table references are allowed."
 
 def validate_table_names(tree: exp.Expression) -> tuple[bool, str]:
     allowed_tables = get_allowed_tables()
-    cte_table_names = get_cte_table_names(tree) # CTEs contain temporary table names -> which wont be in our allow list but we need to allow them
 
-    for table in tree.find_all(exp.Table):
-        table_name = table.name.lower()
-        schema_name = table.db.lower()
-        catalog_name = table.catalog.lower() # PostgreSQL doesn't normally support directly querying another database using otherdb.public.customer (here, otherdb -> catalog). So why check catalog? Because we want our validator to reject unexpected catalog-qualified references rather than assume they are safe.
+    for scope in traverse_scope(tree):
+        for source in scope.sources.values():
 
-        if catalog_name:
-            return False, "Cross-database access is not allowed."
+            if isinstance(source, exp.Table): # scope will be table only for actual table names (not for tables created during CTE). CTE and derived-query sources are represented by 'Scope' objects (Not by 'Table' objects). ('Scope' & 'Table' -> types in sqlglot)
+                table_name = source.name.lower()
+                schema_name = source.db.lower()
+                catalog_name = source.catalog.lower()
 
-        if table_name and table_name in cte_table_names and not schema_name:
-            continue
+                if catalog_name:
+                    return False, "Cross-database access is not allowed."
 
-        if schema_name and schema_name != ALLOWED_SCHEMA:
-            return False, f"Access to schema '{schema_name}' is not allowed."
+                if schema_name and schema_name != ALLOWED_SCHEMA:
+                    return False, f"Access to schema '{schema_name}' is not allowed."
 
-        if table_name and table_name not in allowed_tables:
-            return False, f"Table {table_name} is not allowed."
+                if table_name not in allowed_tables:
+                    return False, f"Table '{table_name}' is not allowed."
 
-    return True, "All referenced tables are allowed"
+    return True, "All physical table references are allowed."
+
 
 def validate_sql(sql: str) -> tuple[bool, str]: #why tuple (& not list)? since, tuple is immutable (llm & any other code cant modify)
     try:
