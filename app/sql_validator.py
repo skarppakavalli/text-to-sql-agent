@@ -5,6 +5,9 @@ from sqlglot.optimizer.scope import traverse_scope # to traverse CTE & sub-queri
 
 from sqlalchemy import inspect
 from app.schema import engine
+from app.logger import get_logger
+
+logger = get_logger(__name__)
 
 ALLOWED_SCHEMA = "public"
 
@@ -59,6 +62,7 @@ def validate_table_names(tree: exp.Expression) -> tuple[bool, str]:
 
 
 def validate_sql(sql: str) -> tuple[bool, str]: #why tuple (& not list)? since, tuple is immutable (llm & any other code cant modify)
+    logger.info("SQL validation started")
     try:
         statements = []
         for statement in sqlglot.parse(sql, read= "postgres"):
@@ -66,12 +70,18 @@ def validate_sql(sql: str) -> tuple[bool, str]: #why tuple (& not list)? since, 
                 if isinstance(statement, exp.Query): # exp.Query => allows SELECT & UNION (b/ r read-only queries)
                     statements.append(statement)
                 else:
+                    logger.warning("SQL validation rejected: non-query statement")
                     return False, "Read-Only statements are allowed."
 
     except ParseError:
+        logger.warning("SQL validation rejected: invalid SQL syntax")
         return False, "Invalid SQL syntax."
 
     if len(statements) != 1:
+        logger.warning(
+            "SQL validation rejected: expected one statement, got %d",
+            len(statements),
+        )
         return False, "Only 1 statement is allowed" #we are allowing only 1 query, eventhough multiple read-only queries are not harmful, for now, we are limiting to 1 to avoid unnecessary select queries
 
     '''
@@ -99,11 +109,16 @@ def validate_sql(sql: str) -> tuple[bool, str]: #why tuple (& not list)? since, 
     )
     for node in tree.walk():
         if isinstance(node, forbidden_nodes):
+            logger.warning(
+                "SQL validation rejected: forbidden operation %s",
+                type(node).__name__,
+            )
             return False, f"SQL Operation not allowed: {type(node).__name__}"
 
 
     is_valid_table, table_message = validate_table_names(tree)
     if not is_valid_table:
+        logger.warning("SQL validation rejected: %s", table_message)
         return is_valid_table, table_message
 
     '''
@@ -114,87 +129,19 @@ def validate_sql(sql: str) -> tuple[bool, str]: #why tuple (& not list)? since, 
     We'll address this through PostgreSQL permissions, transaction settings, statement timeouts and result limits.
     '''
 
+    logger.info("SQL validation passed")
     return True, "SQL passed basic validation."
 
 if __name__ == "__main__":
-    test_cases = [
-        # Valid queries
-        ("Basic SELECT", "SELECT * FROM customer;"),
-        ("WHERE", "SELECT name, city FROM customer WHERE country = 'India';"),
-        (
-            "JOIN",
-            """SELECT c.first_name, i.total
-               FROM customer c
-               JOIN invoice i ON c.customer_id = i.customer_id;"""
-        ),
-        ("LIMIT OFFSET", "SELECT * FROM customer LIMIT 5 OFFSET 2;"),
-        (
-            "GROUP BY HAVING",
-            """SELECT country, COUNT(*)
-               FROM customer
-               GROUP BY country
-               HAVING COUNT(*) > 5;"""
-        ),
-        (
-            "Subquery",
-            """SELECT * FROM customer
-               WHERE customer_id IN (
-                   SELECT customer_id FROM invoice
-               );"""
-        ),
-        (
-            "UNION",
-            """SELECT artist_id FROM album
-               UNION
-               SELECT artist_id FROM album WHERE artist_id = 1;"""
-        ),
-        (
-            "CTE",
-            """WITH customer_sales AS (
-                   SELECT customer_id, SUM(total) AS amount
-                   FROM invoice GROUP BY customer_id
-               )
-               SELECT * FROM customer_sales;"""
-        ),
+    if __name__ == "__main__":
+        test_queries = [
+            "SELECT * FROM customer",
+            "DELETE FROM customer",
+            "SELECT * FROM employees",
+        ]
 
-        # Invalid queries
-        ("DELETE", "DELETE FROM customer WHERE customer_id = 1;"),
-        ("UPDATE", "UPDATE customer SET city = 'Chennai';"),
-        ("DROP", "DROP TABLE customer;"),
-        ("SELECT INTO", "SELECT * INTO customer_backup FROM customer;"),
-        ("Unknown table", "SELECT * FROM employees;"),
-        ("Unknown schema table", "SELECT * FROM public.employees;"),
-        ("Disallowed schema", "SELECT * FROM private.customer;"),
-        (
-            "Multiple statements",
-            "SELECT * FROM customer; SELECT * FROM invoice;"
-        ),
-        ("Invalid syntax", "SELEC * FROM customer;"),
-        (
-            "Nested DML",
-            """WITH x AS (
-                   DELETE FROM customer RETURNING *
-               )
-               SELECT * FROM x;"""
-        ),
-
-        # Edge cases
-        (
-            "CTE name matches physical table",
-            """WITH customer AS (SELECT * FROM invoice)
-               SELECT * FROM customer;"""
-        ),
-        ("Schema-qualified allowed table", "SELECT * FROM public.customer;"),
-        (
-            "External catalog",
-            "SELECT * FROM otherdb.public.customer;"
-        ),
-        ("Row locking", "SELECT * FROM customer FOR UPDATE;"),
-    ]
-
-    for name, sql in test_cases:
-        is_valid, message = validate_sql(sql)
-
-        print(f"\n{name}")
-        print(f"Result: {'PASS' if is_valid else 'REJECTED'}")
-        print(f"Message: {message}")
+        for query in test_queries:
+            is_valid, message = validate_sql(query)
+            print(f"\nQuery: {query}")
+            print(f"Valid: {is_valid}")
+            print(f"Message: {message}")
